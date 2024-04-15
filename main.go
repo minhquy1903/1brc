@@ -1,27 +1,32 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
-	"io"
 	"log"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
-type Temperature struct {
-	Location string
-	Value    float32
-}
-
 type Result struct {
-	Max   float32
-	Min   float32
-	Mean  float32
-	Total float32
+	Max   float64
+	Min   float64
+	Mean  float64
+	Total float64
 	Count int32
 }
 
+func timeTrack(start time.Time, name string) {
+	elapsed := time.Since(start)
+	log.Printf("%s took %s", name, elapsed)
+}
+
 func main() {
+
+	defer timeTrack(time.Now(), "execution time")
+
 	f, err := os.Open("measurements_10m.txt")
 
 	if err != nil {
@@ -29,37 +34,36 @@ func main() {
 	}
 
 	defer f.Close()
-	buf := make([]byte, 1024)
 
-	tmap := make(map[string]Result)
+	tmap := make(map[string]*Result)
 
-	for {
-		n, err := f.Read(buf)
-		if err == io.EOF {
-			break
-		}
+	scanner := bufio.NewScanner(f) //scan the contents of a file and print line by line
+	for scanner.Scan() {
+		line := strings.Split(scanner.Text(), ";")
+
+		temperature, err := strconv.ParseFloat(line[1], 64)
 		if err != nil {
-			fmt.Println(err)
-			continue
+			log.Fatal(err)
 		}
-		if n > 0 {
-			r := strings.Split(string(buf[:n]), ";")
-			fmt.Println(r)
 
-			data := tmap[r[0]]
-
-			if _, ok := tmap[r[0]]; !ok {
-				tmap[r[0]] = Result{
-					Max:   1,
-					Min:   1,
-					Mean:  1,
-					Count: 1,
-					Total: 1,
-				}
-			} else {
-				tmap[r[0]].Count = 1
+		if _, ok := tmap[line[0]]; !ok {
+			tmap[line[0]] = &Result{
+				Max:   temperature,
+				Min:   temperature,
+				Mean:  temperature,
+				Count: 1,
+				Total: 1,
 			}
-
+		} else {
+			tmap[line[0]].Count += 1
+			tmap[line[0]].Max = max(temperature, tmap[line[0]].Max)
+			tmap[line[0]].Min = max(temperature, tmap[line[0]].Min)
 		}
 	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Println("Error reading from file:", err) //print error if scanning is not done properly
+	}
+
+	fmt.Println(tmap)
 }
