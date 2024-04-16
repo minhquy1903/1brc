@@ -1,16 +1,19 @@
 package main
 
 import (
-	"bufio"
-	"fmt"
+	"io"
 	"log"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 )
 
-type Result struct {
+const (
+	READ_BUFFER_SIZE = 1024 * 1024
+	SEMICOLON        = 59
+	END_LINE         = 10
+)
+
+type StationData struct {
 	Max   float64
 	Min   float64
 	Mean  float64
@@ -24,46 +27,73 @@ func timeTrack(start time.Time, name string) {
 }
 
 func main() {
-
 	defer timeTrack(time.Now(), "execution time")
 
-	f, err := os.Open("measurements_10m.txt")
+	file, err := os.Open("measurements.txt")
 
 	if err != nil {
 		log.Fatalf("unable to read file: %v", err)
 	}
 
-	defer f.Close()
+	defer file.Close()
+	buffer := make([]byte, READ_BUFFER_SIZE)
+	leftoverBuffer := make([]byte, 1024)
+	leftoverSize := 0
 
-	tmap := make(map[string]*Result)
+	for {
+		n, err := file.Read(buffer)
+		l := 0
 
-	scanner := bufio.NewScanner(f) //scan the contents of a file and print line by line
-	for scanner.Scan() {
-		line := strings.Split(scanner.Text(), ";")
-
-		temperature, err := strconv.ParseFloat(line[1], 64)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		if _, ok := tmap[line[0]]; !ok {
-			tmap[line[0]] = &Result{
-				Max:   temperature,
-				Min:   temperature,
-				Mean:  temperature,
-				Count: 1,
-				Total: 1,
+		for i := n - 1; i >= 0; i-- {
+			// find the index of the last end line character
+			if buffer[i] == END_LINE {
+				l = i
+				break
 			}
-		} else {
-			tmap[line[0]].Count += 1
-			tmap[line[0]].Max = max(temperature, tmap[line[0]].Max)
-			tmap[line[0]].Min = max(temperature, tmap[line[0]].Min)
+		}
+
+		data := make([]byte, l+leftoverSize)
+		copy(data[:leftoverSize], leftoverBuffer)
+		copy(data[leftoverSize:], buffer[:l])
+		copy(leftoverBuffer, buffer[l+1:])
+		leftoverSize = n - l - 1
+
+		nextIdx := 0
+		dataLen := len(data)
+		for {
+			if nextIdx > dataLen || dataLen == 0 {
+				break
+			}
+			_, _, next := processData(data[nextIdx:])
+			nextIdx += next
+			// fmt.Println(string(name), string(temperature))
+		}
+
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			panic(err)
+		}
+	}
+}
+
+func processData(data []byte) ([]byte, []byte, int) {
+	semicolon := 0
+	n := len(data)
+	endLine := n
+
+	for i := 0; i < n; i++ {
+		if data[i] == SEMICOLON {
+			semicolon = i
+		}
+
+		if data[i] == END_LINE {
+			endLine = i
+			break
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		fmt.Println("Error reading from file:", err) //print error if scanning is not done properly
-	}
-
-	fmt.Println(tmap)
+	return data[:semicolon], data[semicolon+1 : endLine], endLine + 1
 }
