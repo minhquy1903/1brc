@@ -1,9 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
+	"sort"
+	"strconv"
 	"time"
 )
 
@@ -14,22 +17,19 @@ const (
 )
 
 type StationData struct {
-	Max   float64
+	Name  string
 	Min   float64
-	Mean  float64
-	Total float64
-	Count int32
-}
-
-func timeTrack(start time.Time, name string) {
-	elapsed := time.Since(start)
-	log.Printf("%s took %s", name, elapsed)
+	Max   float64
+	Sum   float64
+	Count int
 }
 
 func main() {
 	defer timeTrack(time.Now(), "execution time")
 
-	file, err := os.Open("measurements.txt")
+	result := make(map[string]*StationData)
+
+	file, err := os.Open("measurements_10m.txt")
 
 	if err != nil {
 		log.Fatalf("unable to read file: %v", err)
@@ -60,13 +60,37 @@ func main() {
 
 		nextIdx := 0
 		dataLen := len(data)
+
 		for {
 			if nextIdx > dataLen || dataLen == 0 {
 				break
 			}
-			_, _, next := processData(data[nextIdx:])
+			name, temperatureBytes, next := processData(data[nextIdx:])
 			nextIdx += next
-			// fmt.Println(string(name), string(temperature))
+
+			temperature, err := strconv.ParseFloat(temperatureBytes, 64)
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+
+			station, ok := result[name]
+			if !ok {
+				result[name] = &StationData{name, temperature, temperature, temperature, 1}
+			} else {
+				if temperature < station.Min {
+					station.Min = temperature
+				}
+				if temperature > station.Max {
+					station.Max = temperature
+				}
+				station.Sum += temperature
+				station.Count++
+			}
+
+			if _, ok := result[name]; !ok {
+				result[name].Max = temperature
+			}
 		}
 
 		if err == io.EOF {
@@ -77,9 +101,11 @@ func main() {
 			panic(err)
 		}
 	}
+
+	printResult(result)
 }
 
-func processData(data []byte) ([]byte, []byte, int) {
+func processData(data []byte) (string, string, int) {
 	semicolon := 0
 	n := len(data)
 	endLine := n
@@ -95,5 +121,27 @@ func processData(data []byte) ([]byte, []byte, int) {
 		}
 	}
 
-	return data[:semicolon], data[semicolon+1 : endLine], endLine + 1
+	return string(data[:semicolon]), string(data[semicolon+1 : endLine]), endLine + 1
+}
+
+func printResult(data map[string]*StationData) {
+	result := make(map[string]*StationData, len(data))
+	keys := make([]string, 0, len(data))
+	for _, v := range data {
+		keys = append(keys, v.Name)
+		result[v.Name] = v
+	}
+	sort.Strings(keys)
+
+	print("{")
+	for _, k := range keys {
+		v := result[k]
+		fmt.Printf("%s=%.1f/%.1f/%.1f, ", k, v.Min, v.Sum/float64(v.Count), v.Max)
+	}
+	print("}\n")
+}
+
+func timeTrack(start time.Time, name string) {
+	elapsed := time.Since(start).Seconds()
+	log.Printf("%s took %0.6f", name, elapsed)
 }
