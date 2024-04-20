@@ -5,13 +5,15 @@ import (
 	"io"
 	"log"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 )
 
 const (
-	READ_BUFFER_SIZE = 1024 * 1024
+	READ_BUFFER_SIZE = 64 //1024 * 1024
 	SEMICOLON        = 59
 	END_LINE         = 10
 )
@@ -36,48 +38,72 @@ func main() {
 	}
 
 	defer file.Close()
-	buffer := make([]byte, READ_BUFFER_SIZE)
+	readBuffer := make([]byte, READ_BUFFER_SIZE)
 	leftoverBuffer := make([]byte, 1024)
 	leftoverSize := 0
 
-	for {
-		n, err := file.Read(buffer)
-		fmt.Println(n)
-		l := 0
+	numCPU := 2 //runtime.NumCPU()
+	runtime.GOMAXPROCS(numCPU)
+	ch := make(chan [2]string, numCPU)
 
-		for i := n - 1; i >= 0; i-- {
-			// find the index of the last end line character
-			if buffer[i] == END_LINE {
-				l = i
-				break
+	wg := sync.WaitGroup{}
+	wg.Add(numCPU)
+
+	for i := 0; i < numCPU; i++ {
+
+		go func(i int) {
+			defer wg.Done()
+
+			for {
+				n, err := file.Read(readBuffer)
+
+				if err == io.EOF {
+					break
+				}
+
+				if err != nil {
+					panic(err)
+				}
+
+				l := 0
+				for i := n - 1; i >= 0; i-- {
+					// find the index of the last end line character
+					if readBuffer[i] == END_LINE {
+						l = i
+						break
+					}
+				}
+
+				data := make([]byte, l+leftoverSize)
+				copy(data[:leftoverSize], leftoverBuffer)
+				copy(data[leftoverSize:], readBuffer[:l])
+				copy(leftoverBuffer, readBuffer[l+1:])
+				leftoverSize = n - l - 1
+
+				nextIdx := 0
+				dataLen := len(data)
+
+				fmt.Println("numCPU: ", i)
+				fmt.Println(string(data))
+
+				for {
+					if nextIdx > dataLen || dataLen == 0 {
+						break
+					}
+					name, temperatureString, next := ProcessData(data[nextIdx:])
+					nextIdx += next
+
+					// Pass data to the channel
+					ch <- [2]string{name, temperatureString}
+					// CalculateStationData(name, temperatureString)
+				}
+
 			}
-		}
+		}(i)
+	}
 
-		data := make([]byte, l+leftoverSize)
-		copy(data[:leftoverSize], leftoverBuffer)
-		copy(data[leftoverSize:], buffer[:l])
-		copy(leftoverBuffer, buffer[l+1:])
-		leftoverSize = n - l - 1
-
-		nextIdx := 0
-		dataLen := len(data)
-
-		for {
-			if nextIdx > dataLen || dataLen == 0 {
-				break
-			}
-			name, temperatureString, next := ProcessData(data[nextIdx:])
-			nextIdx += next
-			CalculateStationData(name, temperatureString)
-		}
-
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
-			panic(err)
-		}
+	for v := range ch {
+		CalculateStationData(v[0], v[1])
 	}
 
 	PrintResult(result)
