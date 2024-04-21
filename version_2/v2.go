@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
@@ -8,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/minhquy1903/1brc/util"
@@ -45,11 +47,23 @@ func main() {
 	nCPU := runtime.NumCPU()
 	runtime.GOMAXPROCS(nCPU)
 	workers := nCPU * 2
-	input := make(chan []byte, workers)
 
+	wg := new(sync.WaitGroup)
+	wg.Add(workers)
+
+	input := make(chan []byte, workers)
+	output := make(chan [2]string, workers)
 	for i := 0; i < workers; i++ {
-		go processBuffer(input)
+		go processBuffer(wg, input, output)
 	}
+
+	go func() {
+		for v := range output {
+			processStationData(v[0], v[1])
+		}
+
+		close(output)
+	}()
 
 	readBuffer := make([]byte, READ_BUFFER_SIZE)
 	leftoverBuffer := make([]byte, 1024)
@@ -85,25 +99,9 @@ func main() {
 	}
 
 	close(input)
+	wg.Wait()
 
 	printResult(result)
-}
-
-func processBuffer(input chan []byte) {
-	for data := range input {
-		nextIdx := 0
-		dataLen := len(data)
-
-		for {
-			if nextIdx > dataLen || dataLen == 0 {
-				break
-			}
-			name, temperatureString, next := splitLine(data[nextIdx:])
-			nextIdx += next
-
-			processStationData(name, temperatureString)
-		}
-	}
 }
 
 func printResult(data map[string]*StationData) {
@@ -114,13 +112,44 @@ func printResult(data map[string]*StationData) {
 		result[v.Name] = v
 	}
 	sort.Strings(keys)
+	keyLength := len(keys)
 
-	print("{")
-	for _, k := range keys {
-		v := result[k]
-		fmt.Printf("%s=%.1f/%.1f/%.1f, ", k, v.Min, v.Sum/float64(v.Count), v.Max)
+	var pBuf bytes.Buffer
+
+	pBuf.WriteString("{")
+	for i := 0; i < keyLength-1; i++ {
+		v := result[keys[i]]
+		pBuf.WriteString(fmt.Sprintf("%s=%.1f/%.1f/%.1f, ", keys[i], v.Min, v.Sum/float64(v.Count), v.Max))
 	}
-	print("}\n")
+	v := result[keys[keyLength-1]]
+	pBuf.WriteString(fmt.Sprintf("%s=%.1f/%.1f/%.1f", keys[keyLength-1], v.Min, v.Sum/float64(v.Count), v.Max))
+	pBuf.WriteString("}")
+
+	fmt.Println(pBuf.String())
+
+	if r := util.CheckResult(pBuf.Bytes(), "result_10m.txt"); !r {
+		fmt.Println("Result is not correct")
+	} else {
+		fmt.Println("Result is correct")
+	}
+}
+
+func processBuffer(wg *sync.WaitGroup, input <-chan []byte, output chan<- [2]string) {
+	defer wg.Done()
+
+	for data := range input {
+		nextIdx := 0
+		dataLen := len(data)
+
+		for {
+			if nextIdx > dataLen || dataLen == 0 {
+				break
+			}
+			name, temperatureString, next := splitLine(data[nextIdx:])
+			nextIdx += next
+			output <- [2]string{name, temperatureString}
+		}
+	}
 }
 
 func splitLine(data []byte) (string, string, int) {

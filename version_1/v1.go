@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
@@ -95,13 +96,26 @@ func printResult(data map[string]*StationData) {
 		result[v.Name] = v
 	}
 	sort.Strings(keys)
+	keyLength := len(keys)
 
-	print("{")
-	for _, k := range keys {
-		v := result[k]
-		fmt.Printf("%s=%.1f/%.1f/%.1f, ", k, v.Min, v.Sum/float64(v.Count), v.Max)
+	var pBuf bytes.Buffer
+
+	pBuf.WriteString("{")
+	for i := 0; i < keyLength-1; i++ {
+		v := result[keys[i]]
+		pBuf.WriteString(fmt.Sprintf("%s=%.1f/%.1f/%.1f, ", keys[i], v.Min, v.Sum/float64(v.Count), v.Max))
 	}
-	print("}\n")
+	v := result[keys[keyLength-1]]
+	pBuf.WriteString(fmt.Sprintf("%s=%.1f/%.1f/%.1f", keys[keyLength-1], v.Min, v.Sum/float64(v.Count), v.Max))
+	pBuf.WriteString("}")
+
+	fmt.Println(pBuf.String())
+
+	if r := util.CheckResult(pBuf.Bytes(), "result_10m.txt"); !r {
+		fmt.Println("Result is not correct")
+	} else {
+		fmt.Println("Result is correct")
+	}
 }
 
 func splitLine(data []byte) (string, string, int) {
