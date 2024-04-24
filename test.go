@@ -10,7 +10,7 @@ func main() {
 	workers := runtime.NumCPU()
 	count := 0
 	var mu sync.Mutex
-	consumer := make(chan int, workers)
+	consumer := make(chan int, 1000)
 	wg := new(sync.WaitGroup)
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
@@ -19,20 +19,21 @@ func main() {
 			for i := 0; i < 100; i++ {
 
 				mu.Lock()
-				idx := count + 1
-				input <- idx
+				count++
+				idx := count
 				mu.Unlock()
+				input <- idx
 			}
 		}(wg, consumer)
 	}
 
 	go func() {
-		for v := range consumer {
-			fmt.Println(v)
-		}
+		wg.Wait()
+		close(consumer)
 	}()
 
-	wg.Wait()
-	close(consumer)
+	for v := range consumer {
+		fmt.Println(v)
+	}
 
 }

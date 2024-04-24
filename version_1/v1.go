@@ -1,15 +1,12 @@
 package main
 
 import (
-	"bytes"
-	"fmt"
 	"io"
 	"log"
 	"os"
-	"sort"
-	"strconv"
 	"time"
 
+	"github.com/minhquy1903/1brc/model"
 	"github.com/minhquy1903/1brc/util"
 )
 
@@ -19,19 +16,11 @@ const (
 	END_LINE         = 10
 )
 
-type StationData struct {
-	Name  string
-	Min   float64
-	Max   float64
-	Sum   float64
-	Count int
-}
-
-type Result map[string]*StationData
-
-var result = make(Result)
+var result = make(model.Result)
 
 func main() {
+	defer util.Statistic()()
+
 	defer util.TimeTrack(time.Now(), "execution time")
 
 	file, err := os.Open("measurements_10m.txt")
@@ -78,47 +67,17 @@ func main() {
 			if nextIdx > dataLen || dataLen == 0 {
 				break
 			}
-			name, temperatureString, next := splitLine(data[nextIdx:])
+			name, temperature, next := nextLine(data[nextIdx:])
 			nextIdx += next
 
-			processStationData(name, temperatureString)
+			processLine(name, temperature)
 		}
 	}
 
-	printResult(result)
+	util.PrintResult(result)
 }
 
-func printResult(data map[string]*StationData) {
-	result := make(map[string]*StationData, len(data))
-	keys := make([]string, 0, len(data))
-	for _, v := range data {
-		keys = append(keys, v.Name)
-		result[v.Name] = v
-	}
-	sort.Strings(keys)
-	keyLength := len(keys)
-
-	var pBuf bytes.Buffer
-
-	pBuf.WriteString("{")
-	for i := 0; i < keyLength-1; i++ {
-		v := result[keys[i]]
-		pBuf.WriteString(fmt.Sprintf("%s=%.1f/%.1f/%.1f, ", keys[i], v.Min, v.Sum/float64(v.Count), v.Max))
-	}
-	v := result[keys[keyLength-1]]
-	pBuf.WriteString(fmt.Sprintf("%s=%.1f/%.1f/%.1f", keys[keyLength-1], v.Min, v.Sum/float64(v.Count), v.Max))
-	pBuf.WriteString("}")
-
-	fmt.Println(pBuf.String())
-
-	if r := util.CheckResult(pBuf.Bytes(), "result_10m.txt"); !r {
-		fmt.Println("Result is not correct")
-	} else {
-		fmt.Println("Result is correct")
-	}
-}
-
-func splitLine(data []byte) (string, string, int) {
+func nextLine(data []byte) (string, int, int) {
 	semicolon := 0
 	n := len(data)
 	endLine := n
@@ -134,19 +93,14 @@ func splitLine(data []byte) (string, string, int) {
 		}
 	}
 
-	return string(data[:semicolon]), string(data[semicolon+1 : endLine]), endLine + 1
+	return string(data[:semicolon]), util.BytesToInt(data[semicolon+1 : endLine]), endLine + 1
 }
 
-func processStationData(name string, temperatureString string) {
-	temperature, err := strconv.ParseFloat(temperatureString, 64)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
+func processLine(name string, temperature int) {
 	station, ok := result[name]
+
 	if !ok {
-		result[name] = &StationData{name, temperature, temperature, temperature, 1}
+		result[name] = &model.StationData{Name: name, Min: temperature, Max: temperature, Sum: temperature, Count: 1}
 	} else {
 		if temperature < station.Min {
 			station.Min = temperature
@@ -156,9 +110,5 @@ func processStationData(name string, temperatureString string) {
 		}
 		station.Sum += temperature
 		station.Count++
-	}
-
-	if _, ok := result[name]; !ok {
-		result[name].Max = temperature
 	}
 }

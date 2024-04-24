@@ -1,17 +1,14 @@
 package main
 
 import (
-	"bytes"
-	"fmt"
 	"io"
 	"log"
 	"os"
 	"runtime"
-	"sort"
-	"strconv"
 	"sync"
 	"time"
 
+	"github.com/minhquy1903/1brc/model"
 	"github.com/minhquy1903/1brc/util"
 )
 
@@ -21,47 +18,50 @@ const (
 	END_LINE         = 10
 )
 
-type StationData struct {
-	Name  string
-	Min   float64
-	Max   float64
-	Sum   float64
-	Count int
-}
-
-type Result map[string]*StationData
-
-var result = make(Result)
-var mu sync.Mutex
+var result = make(model.Result)
 
 func main() {
+	defer util.Statistic()()
 	defer util.TimeTrack(time.Now(), "execution time")
 
 	nCPU := runtime.NumCPU()
 	runtime.GOMAXPROCS(nCPU)
-	workers := nCPU * 8
+	workers := nCPU * 2
 
 	wg := new(sync.WaitGroup)
 	wg.Add(workers)
 
 	inputGroup := make([]chan []byte, workers)
-	outputGroup := make([]chan [2]string, workers)
+	outputGroup := make([]chan model.Result, workers)
 
 	for i := 0; i < workers; i++ {
 		input := make(chan []byte, workers)
-		output := make(chan [2]string, workers)
+		output := make(chan model.Result, workers)
 		go processBuffer(wg, input, output)
 
 		inputGroup[i] = input
 		outputGroup[i] = output
-
 	}
 
 	go func() {
 		for i := 0; i < workers; i++ {
 			go func(currentWorker int) {
-				for v := range outputGroup[currentWorker] {
-					processStationData(v[0], v[1])
+				for mapStation := range outputGroup[currentWorker] {
+					for k, v := range mapStation {
+						station, ok := result[k]
+						if !ok {
+							result[k] = v
+						} else {
+							if v.Min < station.Min {
+								station.Min = v.Min
+							}
+							if v.Max > station.Max {
+								station.Max = v.Max
+							}
+							station.Sum += v.Sum
+							station.Count += v.Count
+						}
+					}
 				}
 
 				close(outputGroup[currentWorker])
@@ -124,41 +124,13 @@ func main() {
 
 	wg.Wait()
 
-	printResult(result)
+	util.PrintResult(result)
 }
 
-func printResult(data map[string]*StationData) {
-	result := make(map[string]*StationData, len(data))
-	keys := make([]string, 0, len(data))
-	for _, v := range data {
-		keys = append(keys, v.Name)
-		result[v.Name] = v
-	}
-	sort.Strings(keys)
-	keyLength := len(keys)
-
-	var pBuf bytes.Buffer
-
-	pBuf.WriteString("{")
-	for i := 0; i < keyLength-1; i++ {
-		v := result[keys[i]]
-		pBuf.WriteString(fmt.Sprintf("%s=%.1f/%.1f/%.1f, ", keys[i], v.Min, v.Sum/float64(v.Count), v.Max))
-	}
-	v := result[keys[keyLength-1]]
-	pBuf.WriteString(fmt.Sprintf("%s=%.1f/%.1f/%.1f", keys[keyLength-1], v.Min, v.Sum/float64(v.Count), v.Max))
-	pBuf.WriteString("}")
-
-	fmt.Println(pBuf.String())
-
-	if r := util.CheckResult(pBuf.Bytes(), "result_10m.txt"); !r {
-		fmt.Println("Result is not correct")
-	} else {
-		fmt.Println("Result is correct")
-	}
-}
-
-func processBuffer(wg *sync.WaitGroup, input <-chan []byte, output chan<- [2]string) {
+func processBuffer(wg *sync.WaitGroup, input <-chan []byte, output chan<- model.Result) {
 	defer wg.Done()
+
+	stationMap := make(model.Result)
 
 	for data := range input {
 		nextIdx := 0
@@ -168,14 +140,15 @@ func processBuffer(wg *sync.WaitGroup, input <-chan []byte, output chan<- [2]str
 			if nextIdx > dataLen || dataLen == 0 {
 				break
 			}
-			name, temperatureString, next := splitLine(data[nextIdx:])
+			name, temperature, next := readLine(data[nextIdx:])
 			nextIdx += next
-			output <- [2]string{name, temperatureString}
+			processLine(name, temperature, &stationMap)
 		}
 	}
+	output <- stationMap
 }
 
-func splitLine(data []byte) (string, string, int) {
+func readLine(data []byte) (string, int, int) {
 	semicolon := 0
 	n := len(data)
 	endLine := n
@@ -191,20 +164,13 @@ func splitLine(data []byte) (string, string, int) {
 		}
 	}
 
-	return string(data[:semicolon]), string(data[semicolon+1 : endLine]), endLine + 1
+	return string(data[:semicolon]), util.BytesToInt(data[semicolon+1 : endLine]), endLine + 1
 }
 
-func processStationData(name string, temperatureString string) {
-	temperature, err := strconv.ParseFloat(temperatureString, 64)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	station, ok := result[name]
+func processLine(name string, temperature int, stationMap *model.Result) {
+	station, ok := (*stationMap)[name]
 	if !ok {
-		result[name] = &StationData{name, temperature, temperature, temperature, 1}
+		(*stationMap)[name] = &model.StationData{Name: name, Min: temperature, Max: temperature, Sum: temperature, Count: 1}
 	} else {
 		if temperature < station.Min {
 			station.Min = temperature
@@ -214,9 +180,5 @@ func processStationData(name string, temperatureString string) {
 		}
 		station.Sum += temperature
 		station.Count++
-	}
-
-	if _, ok := result[name]; !ok {
-		result[name].Max = temperature
 	}
 }

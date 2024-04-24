@@ -1,17 +1,14 @@
 package main
 
 import (
-	"bytes"
-	"fmt"
 	"io"
 	"log"
 	"os"
 	"runtime"
-	"sort"
-	"strconv"
 	"sync"
 	"time"
 
+	"github.com/minhquy1903/1brc/model"
 	"github.com/minhquy1903/1brc/util"
 )
 
@@ -21,20 +18,25 @@ const (
 	END_LINE         = 10
 )
 
-type StationData struct {
-	Name  string
-	Min   float64
-	Max   float64
-	Sum   float64
-	Count int
-}
+var result = make(model.Result)
+var mu sync.Mutex
 
-type Result map[string]*StationData
-
-var result = make(Result)
+// var readIdx int
 
 func main() {
+	defer util.Statistic()()
+
 	defer util.TimeTrack(time.Now(), "execution time")
+
+	nCPU := runtime.NumCPU()
+	runtime.GOMAXPROCS(nCPU)
+	workers := nCPU * 2
+
+	wg := new(sync.WaitGroup)
+	wg.Add(workers)
+
+	output := make(chan model.Result, workers)
+	leftOverChan := make(chan []byte)
 
 	file, err := os.Open("measurements_10m.txt")
 
@@ -44,73 +46,50 @@ func main() {
 
 	defer file.Close()
 
-	nCPU := runtime.NumCPU()
-	runtime.GOMAXPROCS(nCPU)
-	workers := nCPU * 2
-
-	wg := new(sync.WaitGroup)
-	wg.Add(workers)
-
-	input := make(chan []byte, workers)
-	output := make(chan [2]string, workers)
 	for i := 0; i < workers; i++ {
-		go processBuffer(wg, input, output)
+		go readFile(wg, file, output, leftOverChan)
 	}
 
 	go func() {
-		for v := range output {
-			processStationData(v[0], v[1])
-		}
-
+		wg.Wait()
+		close(leftOverChan)
 		close(output)
 	}()
 
-	readBuffer := make([]byte, READ_BUFFER_SIZE)
-	leftoverBuffer := make([]byte, 1024)
-	leftoverSize := 0
-
-	for {
-		n, err := file.Read(readBuffer)
-
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
-			panic(err)
-		}
-
-		l := 0
-		for i := n - 1; i >= 0; i-- {
-			// find the index of the last end line character
-			if readBuffer[i] == END_LINE {
-				l = i
-				break
+	// handle data output
+	for mapStation := range output {
+		for k, v := range mapStation {
+			station, ok := result[k]
+			if !ok {
+				result[k] = v
+			} else {
+				if v.Min < station.Min {
+					station.Min = v.Min
+				}
+				if v.Max > station.Max {
+					station.Max = v.Max
+				}
+				station.Sum += v.Sum
+				station.Count += v.Count
 			}
 		}
-
-		data := make([]byte, l+leftoverSize)
-		copy(data[:leftoverSize], leftoverBuffer)
-		copy(data[leftoverSize:], readBuffer[:l])
-		copy(leftoverBuffer, readBuffer[l+1:])
-		leftoverSize = n - l - 1
-
-		input <- data
 	}
 
-	close(input)
-	wg.Wait()
-
-	printResult(result)
+	util.PrintResult(result)
 }
 
-func readFile(f *os.File, wg *sync.WaitGroup) {
+func readFile(wg *sync.WaitGroup, f *os.File, output chan model.Result, leftOverChan chan []byte) {
+	defer wg.Done()
+
 	readBuf := make([]byte, READ_BUFFER_SIZE)
-	readBuffer := make([]byte, READ_BUFFER_SIZE)
-	leftoverBuffer := make([]byte, 1024)
-	leftoverSize := 0
+	data := make(model.Result)
+
 	for {
+		mu.Lock()
+		// readIdx++
+		// idx := readIdx
 		n, err := f.Read(readBuf)
+		mu.Unlock()
 
 		if err == io.EOF {
 			break
@@ -120,74 +99,50 @@ func readFile(f *os.File, wg *sync.WaitGroup) {
 			log.Fatalf("unable to read file: %v", err)
 		}
 
-		l := 0
+		firstLineIdx := 0
+		lastLineIdx := 0
+
+		// get index of the first line
+		for i := 0; i < n; i++ {
+			if readBuf[i] == END_LINE {
+				firstLineIdx = i
+				break
+			}
+		}
+
+		// fmt.Print(readBuf[:firstLineIdx+1])
+
 		for i := n - 1; i >= 0; i-- {
 			// find the index of the last end line character
 			if readBuf[i] == END_LINE {
-				l = i
+				lastLineIdx = i
 				break
 			}
 		}
 
-		data := make([]byte, l+leftoverSize)
-		copy(data[:leftoverSize], leftoverBuffer)
-		copy(data[leftoverSize:], readBuffer[:l])
-		copy(leftoverBuffer, readBuffer[l+1:])
-		leftoverSize = n - l - 1
+		// readBuf[lastLineIdx+1:]
 
+		processBuffer(readBuf[firstLineIdx+1:lastLineIdx], &data, output)
 	}
 
+	output <- data
 }
 
-func printResult(data map[string]*StationData) {
-	result := make(map[string]*StationData, len(data))
-	keys := make([]string, 0, len(data))
-	for _, v := range data {
-		keys = append(keys, v.Name)
-		result[v.Name] = v
-	}
-	sort.Strings(keys)
-	keyLength := len(keys)
+func processBuffer(data []byte, stationMap *model.Result, output chan model.Result) {
+	nextIdx := 0
+	dataLen := len(data)
 
-	var pBuf bytes.Buffer
-
-	pBuf.WriteString("{")
-	for i := 0; i < keyLength-1; i++ {
-		v := result[keys[i]]
-		pBuf.WriteString(fmt.Sprintf("%s=%.1f/%.1f/%.1f, ", keys[i], v.Min, v.Sum/float64(v.Count), v.Max))
-	}
-	v := result[keys[keyLength-1]]
-	pBuf.WriteString(fmt.Sprintf("%s=%.1f/%.1f/%.1f", keys[keyLength-1], v.Min, v.Sum/float64(v.Count), v.Max))
-	pBuf.WriteString("}")
-
-	fmt.Println(pBuf.String())
-
-	if r := util.CheckResult(pBuf.Bytes(), "result_10m.txt"); !r {
-		fmt.Println("Result is not correct")
-	} else {
-		fmt.Println("Result is correct")
-	}
-}
-
-func processBuffer(wg *sync.WaitGroup, input <-chan []byte, output chan<- [2]string) {
-	defer wg.Done()
-
-	for data := range input {
-		nextIdx := 0
-		dataLen := len(data)
-
-		for {
-			if nextIdx > dataLen || dataLen == 0 {
-				break
-			}
-			name, temperatureString, next := splitLine(data[nextIdx:])
-			nextIdx += next
-			output <- [2]string{name, temperatureString}
+	for {
+		if nextIdx > dataLen || dataLen == 0 {
+			break
 		}
+		name, temperature, next := readLine(data[nextIdx:])
+		nextIdx += next
+		processLine(name, temperature, stationMap)
 	}
 }
 
-func splitLine(data []byte) (string, string, int) {
+func readLine(data []byte) (string, int, int) {
 	semicolon := 0
 	n := len(data)
 	endLine := n
@@ -203,19 +158,13 @@ func splitLine(data []byte) (string, string, int) {
 		}
 	}
 
-	return string(data[:semicolon]), string(data[semicolon+1 : endLine]), endLine + 1
+	return string(data[:semicolon]), bytesToInt(data[semicolon+1 : endLine]), endLine + 1
 }
 
-func processStationData(name string, temperatureString string) {
-	temperature, err := strconv.ParseFloat(temperatureString, 64)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	station, ok := result[name]
+func processLine(name string, temperature int, stationMap *model.Result) {
+	station, ok := (*stationMap)[name]
 	if !ok {
-		result[name] = &StationData{name, temperature, temperature, temperature, 1}
+		(*stationMap)[name] = &model.StationData{Name: name, Min: temperature, Max: temperature, Sum: temperature, Count: 1}
 	} else {
 		if temperature < station.Min {
 			station.Min = temperature
@@ -226,8 +175,27 @@ func processStationData(name string, temperatureString string) {
 		station.Sum += temperature
 		station.Count++
 	}
+}
 
-	if _, ok := result[name]; !ok {
-		result[name].Max = temperature
+func bytesToInt(byteArray []byte) int {
+	var result int
+	negative := false
+
+	for _, b := range byteArray {
+		if b == 46 { // .
+			continue
+		}
+
+		if b == 45 { // -
+			negative = true
+			continue
+		}
+		result = result*10 + int(b-48)
 	}
+
+	if negative {
+		return -result
+	}
+
+	return result
 }
